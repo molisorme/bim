@@ -1,0 +1,483 @@
+import numpy as np
+import socket
+import binascii
+import collections
+import threading
+import matplotlib.pyplot as plt
+import time
+import pika
+import datetime
+import itertools
+import sys
+# import time
+# import datetime
+import csv
+import pickle
+
+from matplotlib.animation import FuncAnimation
+
+from functions.event_analysis import event_analysis_hd
+from functions.subanalysis import subanalysishd
+from settings import *
+
+if not sys.warnoptions:
+    import warnings
+    warnings.simplefilter("ignore")
+
+
+class EventGenerationClass:
+    raw_data_queue = collections.deque(maxlen=WIN_PERIOD * PERIOD_NUMBER)
+    mean_less_data_queue = collections.deque(maxlen=WIN_PERIOD * PERIOD_NUMBER)
+    event_dict = [[{} for i in range(25)] for j in range(4)]
+    event_abstract = [[0,0,0,0,0]]
+
+    def __init__(self, k):
+
+        self.mean_temp1 = collections.deque(maxlen=50)
+
+        self.mean_temp_queue = collections.deque(maxlen=PERIOD_NUMBER)
+        self.mode = MODE
+        self.k = k
+        self.weight_coefficient = WEIGHT_COEFFICIENT[k-3]
+        self.win_period = WIN_PERIOD
+        self.win_period_half = round(self.win_period / 2)
+        self.win_period_third = round(self.win_period / 3)
+        self.win_period_quarter = round(self.win_period / 4)
+
+        self.c1 = 1
+        self.c3 = 0
+        self.event_number = 0
+        self.event_start = 0
+        self.before_event_end = 0
+        self.startbefor = 0
+        self.endbefore = 0
+        self.minimum_weight = 7000
+        self.event_between_time = 10
+        self.start_event_between_time = 10
+        self.maximum_time_between_two_event = 30
+        self.event_maximum_weight = self.minimum_weight
+        self.event_flag = 0
+        self.new_event = 0
+
+    def get_platform_name(self,platform_num):
+        if platform_num == 0:
+            return "A1"
+        elif platform_num == 1 :
+            return "A2"
+        elif platform_num == 2 :
+            return "B1"
+        elif platform_num == 3 :
+            return "B2"
+
+    def generate_event(self,m_c):
+        temp_dict = dict()
+
+        self.c1 = self.c1 + 1
+        self.c3 = self.c3+self.win_period
+
+        begin_index = (self.c1-1) * self.win_period-m_c + len(EventGenerationClass.mean_less_data_queue)
+        end_index = (self.c1) * self.win_period-m_c + len(EventGenerationClass.mean_less_data_queue)
+
+        temp = np.array(list(itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index, end_index)))[:, self.k]
+        raw_temp = np.array(list(itertools.islice(EventGenerationClass.raw_data_queue, begin_index, end_index)))[:, self.k]
+
+        # print(self.k - 3, np.mean(raw_temp))
+
+        self.mean_temp_queue.append(np.mean(temp))
+        if self.mean_temp_queue[-1] > self.minimum_weight:
+            # print("mean temp > 7000")
+            if ((((self.c1 - self.before_event_end) > self.event_between_time) and ((self.c1 - self.event_start) > self.start_event_between_time))
+                    or (self.c1 < self.event_between_time and (self.c1 - self.before_event_end) > 5)):
+
+                # self.event_number = self.event_number+1
+                self.event_number = 1
+                # print(self.event_number)
+
+                self.event_maximum_weight = self.mean_temp_queue[-1]
+                self.event_flag = 1
+                if (((self.c1 - self.before_event_end) <= self.maximum_time_between_two_event) and
+                        (self.event_number >= 2)):
+                    self.new_event = 1
+                    self.startbefor = self.event_start
+                    self.endbefore = self.before_event_end
+
+                self.event_start = self.c1
+
+            self.before_event_end = self.c1
+            temp2 = max(self.event_maximum_weight, self.mean_temp_queue[-1])
+
+            if temp2  <= 50000:
+                self.event_between_time = 8
+            elif 50000 < temp2  <= 100000:
+                self.event_between_time = 10
+            elif 100000 < temp2  <= 150000:
+                self.event_between_time = 10
+            elif 150000 < temp2  <= 200000:
+                self.event_between_time = 11
+            elif 200000 < temp2  <= 250000:
+                self.event_between_time = 12
+            elif 250000 < temp2  <= 300000:
+                self.event_between_time = 12
+            else:
+                self.event_between_time = 15
+
+            self.event_maximum_weight = temp2
+        else:
+            self.mean_temp_queue[-1] = 0
+            if m_c % 100 == 0:
+                self.mean_temp1.append(np.mean(raw_temp))
+
+        if self.new_event == 1:
+            print("previous_event")
+
+            self.new_event = 0
+            temp_dict['platformnum']= self.event_number -1
+
+            begin_index = (self.startbefor - 3) * self.win_period - m_c + len(EventGenerationClass.mean_less_data_queue)
+            end_index = (self.endbefore + 5) * self.win_period - m_c + len(EventGenerationClass.mean_less_data_queue)
+
+            temp_dict['dataraw'] = np.array(list(itertools.islice(EventGenerationClass.raw_data_queue, begin_index, end_index)))[:,(0,1,2,self.k)]
+            temp_dict['datarawmeanlessplatform'] = np.array(list(itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index, end_index)))[:,(0,1,2,self.k)]
+            temp_dict['datarawmeanlessfull'] = np.array(list(itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index, end_index)))
+
+            try:
+                datarawmeanlessfull_fix = np.array(list(itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index-(8*self.win_period), end_index)))
+                temp_dict['datarawmeanlessfull_fix'] = np.zeros((4500, 7))
+                temp_dict['datarawmeanlessfull_fix'][:np.shape(datarawmeanlessfull_fix)[0], :] =\
+                    datarawmeanlessfull_fix
+            except:
+                print("datarawmeanlessfull_fix indices exceed")
+                temp_dict['datarawmeanlessfull_fix'] = "indices exceed 4500"
+
+            temp_dict['meantemp'] = np.array(list(itertools.islice(self.mean_temp_queue, (self.startbefor - 2) - (self.c1+1) + len(self.mean_temp_queue), (self.endbefore + 6) - (self.c1+1) +len(self.mean_temp_queue))))
+
+            # region event time
+            t1 = EventGenerationClass.mean_less_data_queue[begin_index][1]
+            t2 = int(t1) + (t1 - int(t1)) * 0.6
+            event_t1 = t2
+            t1 = EventGenerationClass.mean_less_data_queue[end_index][1]
+            t2 = int(t1) + (t1 - int(t1)) * 0.6
+            event_t4 = t2
+            temp_dict['time'] = [event_t1, 0, 0, event_t4]
+            # endregion
+
+            temp_dict['mean'],\
+            temp_dict['data_valid'],\
+            temp_dict['axlenum']= \
+                event_analysis_hd(
+                    temp_dict['meantemp'],
+                    temp_dict['datarawmeanlessplatform'],
+                    self.win_period)
+
+            EventGenerationClass.event_dict[self.k-3][self.event_number-1] = temp_dict
+
+            EventGenerationClass.event_dict,\
+            self.event_number,\
+            EventGenerationClass.event_abstract = \
+                subanalysishd(self.event_number,
+                              temp_dict['datarawmeanlessplatform'],
+                              EventGenerationClass.event_dict,
+                              self.event_number-1,
+                              self.k,
+                              self.win_period,
+                              self.win_period_third,
+                              self.weight_coefficient,
+                              self.mode,
+                              EventGenerationClass.event_abstract)
+            print("platform:",self.get_platform_name(self.k-3))
+            print("---")
+
+        if ((((self.c1 - self.before_event_end) >= self.maximum_time_between_two_event) and (self.event_flag == 1))
+                or ((self.c3 >= m_c) and (self.event_flag == 1))):
+            # print("current_event")
+
+            self.event_flag = 0
+            temp_dict['platformnum'] = self.event_number
+
+            begin_index = (self.event_start - 3) * self.win_period - m_c + len(EventGenerationClass.mean_less_data_queue)
+            end_index = (self.before_event_end + 5) * self.win_period - m_c + len(EventGenerationClass.mean_less_data_queue)
+
+            temp_dict['dataraw'] = np.array(list(itertools.islice(EventGenerationClass.raw_data_queue, begin_index, end_index)))[:,(0,1,2,self.k)]
+            temp_dict['datarawmeanlessplatform'] = np.array(list(itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index, end_index)))[:,(0,1,2,self.k)]
+            temp_dict['datarawmeanlessfull'] = np.array(list(itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index, end_index)))
+
+            try:
+                datarawmeanlessfull_fix = np.array(list(itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index-(8*self.win_period), end_index)))
+                temp_dict['datarawmeanlessfull_fix'] = np.zeros((4500, 7))
+                temp_dict['datarawmeanlessfull_fix'][:np.shape(datarawmeanlessfull_fix)[0], :] =\
+                    datarawmeanlessfull_fix
+            except:
+                print("datarawmeanlessfull_fix indices exceed")
+                temp_dict['datarawmeanlessfull_fix'] = "indices exceed 4500"
+
+            temp_dict['meantemp'] = np.array(list(itertools.islice(self.mean_temp_queue, (self.event_start - 2)-(self.c1+1) + len(self.mean_temp_queue), (self.before_event_end + 6)-(self.c1+1)+ len(self.mean_temp_queue))))
+
+            # region event time
+            t1 = EventGenerationClass.mean_less_data_queue[begin_index][1]
+            t2 = int(t1) + (t1 - int(t1)) * 0.6
+            event_t1 = t2
+            t1 = EventGenerationClass.mean_less_data_queue[end_index][1]
+            t2 = int(t1) + (t1 - int(t1)) * 0.6
+            event_t4 = t2
+            temp_dict['time'] = [event_t1, 0, 0, event_t4]
+            # endregion
+
+            temp_dict['mean'], \
+            temp_dict['data_valid'], \
+            temp_dict['axlenum'] = \
+                event_analysis_hd(
+                    temp_dict['meantemp'],
+                    temp_dict['datarawmeanlessplatform'],
+                    self.win_period)
+
+            # print(temp_dict['axlenum'])
+            print("platform:",self.get_platform_name(self.k-3))
+            print("---")
+            EventGenerationClass.event_dict[self.k-3][self.event_number] = temp_dict
+
+            EventGenerationClass.event_dict,\
+            self.event_number,\
+            EventGenerationClass.event_abstract = \
+                subanalysishd(self.event_number,
+                              temp_dict['datarawmeanlessplatform'],
+                              EventGenerationClass.event_dict,
+                              self.event_number,
+                              self.k,
+                              self.win_period,
+                              self.win_period_third,
+                              self.weight_coefficient,
+                              self.mode,
+                              EventGenerationClass.event_abstract)
+
+
+class PlottingClass:
+
+    def __init__(self):
+        self.fig, self.axs = plt.subplots(5, sharex="col", gridspec_kw={'hspace': 0})
+        self.custom_title = ''
+        self.new_event = 0
+        temp_list = ['tab:red', 'tab:green', 'tab:blue']
+        self.color_list = itertools.cycle(temp_list)
+        self.c = 'tab:blue'
+
+    def animation_function(self, i):
+        self.axs[1].cla()
+        self.axs[2].cla()
+
+        if self.new_event:
+            self.c = next(self.color_list)
+            self.new_event = 0
+            self.axs[0].cla()
+            self.axs[0].text(0.5, 0.5,self.custom_title, color=self.c, fontsize=15, bbox=dict(facecolor='white', alpha=0.5))
+
+        try:
+            l = np.array(list(EventGenerationClass.mean_less_data_queue))
+            a1 = l[:, 3]
+            a2 = l[:, 4]
+            b1 = l[:, 5]
+            b2 = l[:, 6]
+
+            self.axs[1].plot(b1, self.c, linewidth=1)
+            self.axs[1].set_ylabel('Platform B1',fontsize='medium')
+            self.axs[1].tick_params(labelleft=False, labelright=True)
+
+            # self.axs[0].plot(b1, 'tab:red', linewidth=1)
+
+            self.axs[2].plot(b2, self.c, linewidth=1)
+            self.axs[2].set_ylabel('Platform B2', fontsize='medium')
+            self.axs[2].tick_params(labelleft=False, labelright=True)
+
+            # self.axs[1].plot(b2, 'tab:red', linewidth=1)
+
+        except:
+            print("no data to plot")
+
+        # self.fig.suptitle(self.custom_title)
+        # self.fig.tight_layout()
+
+    def start_plotting(self):
+        plt.style.use('fivethirtyeight')
+        ani = FuncAnimation(plt.gcf(), self.animation_function, interval=500)
+        plt.show()
+
+
+def load_npy(directory):
+    with open(directory, 'rb') as f:
+        init_data = np.load(f)
+
+    # print(init_data.shape[0])
+    fig, axs = plt.subplots(2, 1)
+    axs[0].plot(init_data[:, 3],'b',linewidth=0.5)
+    axs[1].plot(init_data[:, 4],'b',linewidth=0.5)
+    axs[0].plot(init_data[:, 5],'r',linewidth=0.5)
+    axs[1].plot(init_data[:, 6],'r',linewidth=0.5)
+    plt.show()
+
+    wim_data = init_data
+    return wim_data
+
+
+def load_txt(directory, minute):
+    col_num = 0
+    a1 = f"{directory}\\p_A1\\{minute}_Minute_RAW.txt"
+    a2 = f"{directory}\\p_A2\\{minute}_Minute_RAW.txt"
+    b1 = f"{directory}\\p_B1\\{minute}_Minute_RAW.txt"
+    b2 = f"{directory}\\p_B2\\{minute}_Minute_RAW.txt"
+
+    with open(a1) as inf:
+        reader = csv.reader(inf, delimiter=" ")
+        for i in range(5):
+            next(inf)
+        init_data = np.array(list((zip(*reader))))
+    init_data = np.transpose(init_data)
+
+    with open(a1) as inf:
+        reader = csv.reader(inf, delimiter=" ")
+        for i in range(5):
+            next(inf)
+        a1_data = np.array(list((zip(*reader))))
+    a1_data = np.transpose(a1_data)
+
+    with open(a2) as inf:
+        reader = csv.reader(inf, delimiter=" ")
+        for i in range(5):
+            next(inf)
+        a2_data = np.array(list((zip(*reader))))
+    a2_data = np.transpose(a2_data)
+
+    with open(b1) as inf:
+        reader = csv.reader(inf, delimiter=" ")
+        for i in range(5):
+            next(inf)
+        b1_data = np.array(list((zip(*reader))))
+    b1_data = np.transpose(b1_data)
+
+    with open(b2) as inf:
+        reader = csv.reader(inf, delimiter=" ")
+        for i in range(5):
+            next(inf)
+        b2_data = np.array(list((zip(*reader))))
+    b2_data = np.transpose(b2_data)
+
+    wim_data = np.zeros((init_data.shape[0], 7))
+    for i in range(len(init_data[:, 0])):
+        wim_data[i, 0] = i+1
+        wim_data[i, 1] = minute + (float(init_data[i, col_num]) - float(init_data[0, col_num])) / init_data.shape[0]
+        wim_data[i, 2] = init_data[i, col_num]
+        wim_data[i, 3] = float(a1_data[i, col_num + 1])
+        wim_data[i, 4] = float(a2_data[i, col_num + 1])
+        wim_data[i, 5] = float(b1_data[i, col_num + 1])
+        wim_data[i, 6] = float(b2_data[i, col_num + 1])
+
+    return wim_data
+
+
+def calculate_mean(data):
+    mean_less = np.zeros(np.shape(data))
+    mean = np.zeros(4)
+
+    mean_less[:, :3] = data[:, :3]
+    for i in range(3, 7):
+        mean_less[:, i] = data[:, i] - np.mean(data[:, i])
+        mean[i-3] = np.mean(data[:, i])
+    return mean_less,mean
+
+
+def server():
+
+    # temp0_data = load_npy(r"D:\DATA 2\Kashan\20201117\15_Hour")
+    temp0_data = load_txt( r"D:\Projects\PycharmProjects\wim-pasgah-comparison\logs\10_Hour",18)
+
+    temp_data,live_mean = calculate_mean(temp0_data)
+    main_counter = 0
+
+    while True:
+        # print(">> ", temp_data)
+        EventGenerationClass.raw_data_queue.append([temp_data[main_counter, 0],
+                                              temp_data[main_counter,1],
+                                              temp_data[main_counter,2],
+                                              temp_data[main_counter,3],
+                                              temp_data[main_counter,4],
+                                              temp_data[main_counter,5],
+                                              temp_data[main_counter,6]])
+
+        EventGenerationClass.mean_less_data_queue.append([temp_data[main_counter,0],
+                                              temp_data[main_counter,1],
+                                              temp_data[main_counter,2],
+                                              temp_data[main_counter,3]-live_mean[0],
+                                              temp_data[main_counter,4]-live_mean[1],
+                                              temp_data[main_counter,5]-live_mean[2],
+                                              temp_data[main_counter,6]-live_mean[3]])
+
+        main_counter += 1
+        # time.sleep(0.00000001)
+
+        if main_counter % WIN_PERIOD == 0 and main_counter > WIN_PERIOD:
+
+        # try:
+            pA1.generate_event(main_counter)
+            pA2.generate_event(main_counter)
+            pB1.generate_event(main_counter)
+            pB2.generate_event(main_counter)
+
+            if len(EventGenerationClass.event_abstract) > 1:
+                print("integrated")
+
+                plotter.new_event = 1
+                ab = EventGenerationClass.event_abstract[-1]
+                # print(ab)
+                axle_number = EventGenerationClass.event_dict[int(ab[3])][int(ab[2])]['integrate'][
+                    'numaxle']
+                axle_number = int(axle_number)
+
+                weight = \
+                    EventGenerationClass.event_dict[int(ab[3])][int(ab[2])]['integrate']['totalweight'][
+                        4]
+                weight = int(weight)
+
+                velocity = \
+                    EventGenerationClass.event_dict[int(ab[3])][int(ab[2])]['integrate']['velocity'][4]
+                velocity = int(velocity)
+
+                car_class = EventGenerationClass.event_dict[int(ab[3])][int(ab[2])]['integrate'][
+                    'class']
+
+                label = f"Axle:{axle_number} Weight:{weight} Velocity:{velocity} Class:{car_class}"
+                plotter.custom_title = label
+                print(label)
+                print("-" * 20)
+
+                EventGenerationClass.event_abstract = [[0, 0, 0, 0, 0]]
+                EventGenerationClass.event_dict = [[{} for i in range(25)] for j in range(4)]
+
+        if main_counter % (2000*1) == 0 and main_counter > WIN_PERIOD:
+            live_mean = [np.mean(pA1.mean_temp1),
+                         np.mean(pA2.mean_temp1),
+                         np.mean(pB1.mean_temp1),
+                         np.mean(pB2.mean_temp1)]
+
+        if main_counter == np.shape(temp0_data)[0]:
+
+            print("finished")
+            break
+
+    print("end of while")
+
+
+if __name__ == '__main__':
+
+    pA1 = EventGenerationClass(3)
+    pA2 = EventGenerationClass(4)
+    pB1 = EventGenerationClass(5)
+    pB2 = EventGenerationClass(6)
+    server_thread = threading.Thread(target=server)
+    server_thread.start()
+
+    # event_processor = EventProcessingClass()
+    # event_queue_thread = threading.Thread(target=event_processor.event_queue_read)
+    # event_queue_thread.start()
+
+    plotter = PlottingClass()
+    plotter.start_plotting()
+
+
