@@ -1,0 +1,378 @@
+import scipy.io
+import numpy as np
+import collections
+import itertools
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import csv
+import sys
+import os
+
+if not sys.warnoptions:
+    import warnings
+    warnings.simplefilter("ignore")
+
+from functions.event_analysis import event_analysis_hd
+from functions.subanalysis import subanalysishd
+from settings import *
+
+
+class EventGenerationClass:
+    event_dict = [[{} for i in range(3)] for j in range(4)]
+    event_abstract = [[0,0,0,0,0]]
+
+    def __init__(self, data_mean_less, win_frequency,wim_data,weight_coefficient,mode,k):
+
+        self.data_mean_less = data_mean_less
+        self.wim_data = wim_data
+        self.mode = mode
+        self.k = k
+
+        self.mean_temp = [0] * PERIOD_NUMBER*WIN_PERIOD
+        self.event_mat = [0] * PERIOD_NUMBER*WIN_PERIOD
+        self.temp2 = [0] * PERIOD_NUMBER*WIN_PERIOD
+
+        self.data_raw_noise_less = data_mean_less
+        self.data_noise_less = np.zeros(np.shape(data_mean_less))
+        self.data_noise_less = data_mean_less[:, :3]
+
+        self.data = data_mean_less[:, k]
+        self.weight_coefficient = weight_coefficient
+        self.win_period = win_frequency
+        self.win_period_half = round(self.win_period / 2)
+        self.win_period_third = round(self.win_period / 3)
+        self.win_period_quarter = round(self.win_period / 4)
+
+        self.m = np.shape(data_mean_less)[0]
+        self.m = self.m - 4 * self.win_period
+
+        self.c1 = 1
+        self.c3 = 0
+        self.event_number = 0
+        self.event_start = 0
+        self.before_event_end = 0
+        self.startbefor = 0
+        self.endbefore = 0
+        self.minimum_weight = 7000
+        self.event_between_time = 10
+        self.start_event_between_time = 10
+        self.maximum_time_between_two_event = 30
+        self.event_maximum_weight = self.minimum_weight
+        self.event_flag = 0
+        self.new_event = 0
+
+        self.mean_temp1 = collections.deque(maxlen=50)
+        for z in range(51):
+            self.mean_temp1.append(0)
+
+    def generate_event(self):
+
+        while self.c3<self.m:
+            temp_dict = dict()
+
+            self.c1 = self.c1 + 1
+            self.c3 = self.c3+self.win_period
+
+            begin_index = (self.c1-1) * self.win_period
+            end_index = (self.c1) * self.win_period
+
+            temp0 = self.data[begin_index:end_index]
+            temp = self.data[begin_index:end_index] - np.mean(self.mean_temp1)
+            temp1 = np.mean(temp0)
+            if abs(temp1) < 7000:
+                self.mean_temp1.append(temp1)
+
+            self.mean_temp[self.c1] = temp1
+
+            if self.mean_temp[self.c1] > self.minimum_weight:
+                self.data_raw_noise_less[begin_index:end_index, self.k] = temp
+                if ((((self.c1 - self.before_event_end) > self.event_between_time) and ((self.c1 - self.event_start) > self.start_event_between_time))
+                        or (self.c1 < self.event_between_time and (self.c1 - self.before_event_end) > 5)):
+
+                    self.event_number = self.event_number + 1
+                    self.event_maximum_weight = self.mean_temp[self.c1]
+                    self.event_flag = 1
+                    if (((self.c1 - self.before_event_end) <= self.maximum_time_between_two_event) and
+                            (self.event_number >= 2)):
+                        self.new_event = 1
+                        self.startbefor = self.event_start
+                        self.endbefore = self.before_event_end
+
+                    self.event_start = self.c1
+
+                self.before_event_end = self.c1
+                self.event_mat[self.c1] = self.event_number
+                self.temp2[self.c1] = max(self.event_maximum_weight, self.mean_temp[self.c1])
+
+                if self.temp2[self.c1]  <= 50000:
+                    self.event_between_time = 8
+                elif 50000 < self.temp2[self.c1]<= 100000:
+                    self.event_between_time = 10
+                elif 100000 < self.temp2[self.c1]<= 150000:
+                    self.event_between_time = 10
+                elif 150000 < self.temp2[self.c1]<= 200000:
+                    self.event_between_time = 11
+                elif 200000 < self.temp2[self.c1]<= 250000:
+                    self.event_between_time = 12
+                elif 250000 < self.temp2[self.c1]<= 300000:
+                    self.event_between_time = 12
+                else:
+                    self.event_between_time = 15
+
+                self.event_maximum_weight = self.temp2[self.c1]
+            else:
+                self.mean_temp[self.c1] = 0
+
+            if self.new_event == 1:
+
+                self.new_event = 0
+                temp_dict['platformnum']= self.event_number -1
+
+                begin_index = (self.startbefor - 3) * self.win_period
+                end_index = (self.endbefore + 5) * self.win_period
+
+                temp11 = self.wim_data[begin_index:end_index, (0,1,2,self.k)]
+                temp12 = self.data_raw_noise_less[begin_index:end_index,(0,1,2,self.k)]
+                temp13 = self.mean_temp[(self.startbefor - 2): (self.endbefore + 6)]
+                temp_dict['dataraw'] = temp11
+                temp_dict['datarawmeanlessplatform'] = temp12
+                temp_dict['datarawmeanlessfull'] = self.data_raw_noise_less[begin_index:end_index,:]
+
+                t1 = self.wim_data[(self.startbefor - 3) * self.win_period, 1]
+                t2 = int(t1) + (t1 - int(t1)) * 0.6
+                event_t1 = t2
+                if (self.endbefore + 5) * self.win_period <= len(self.wim_data[:, 1]):
+                    t1 = self.wim_data[(self.endbefore + 5) * self.win_period, 1]
+                else:
+                    t1 = self.wim_data[-1, 1]
+                t2 = int(t1) + (t1 - int(t1)) * 0.6
+                event_t4 = t2
+                temp_dict['time'] = [event_t1, 0, 0, event_t4]
+
+                temp_dict['mean'],\
+                temp_dict['data_valid'],\
+                temp_dict['axlenum']= event_analysis_hd(temp13,temp12,self.win_period)
+
+                EventGenerationClass.event_dict[self.k-3][self.event_number-1] = temp_dict
+
+                EventGenerationClass.event_dict,\
+                self.event_number,\
+                EventGenerationClass.event_abstract = \
+                    subanalysishd(self.event_number,
+                                  temp12,
+                                  EventGenerationClass.event_dict,
+                                  self.event_number-1,
+                                  self.k,
+                                  self.win_period,
+                                  self.win_period_third,
+                                  self.weight_coefficient,
+                                  self.mode,
+                                  EventGenerationClass.event_abstract)
+
+            if ((((self.c1 - self.before_event_end) >= self.maximum_time_between_two_event)and (self.event_flag == 1))
+                    or ((self.c3 >= self.m) and (self.event_flag == 1))):
+
+                self.event_flag = 0
+                temp_dict['platformnum'] = self.event_number
+
+                begin_index = (self.event_start - 3) * self.win_period
+                end_index = (self.before_event_end + 5) * self.win_period
+
+                if end_index <= np.shape(self.wim_data)[0]:
+                    temp11 = self.wim_data[begin_index:end_index, (0, 1, 2, self.k)]
+                    temp12 = self.data_raw_noise_less[begin_index:end_index, (0, 1, 2, self.k)]
+                    temp_dict['datarawmeanlessfull'] = self.data_raw_noise_less[begin_index:end_index,:]
+                else:
+                    temp11 = self.wim_data[begin_index:, (0, 1, 2, self.k)]
+                    temp12 = self.data_raw_noise_less[begin_index:, (0, 1, 2, self.k)]
+                    temp_dict['datarawmeanlessfull'] = self.data_raw_noise_less[begin_index:, :]
+
+                temp_dict['dataraw'] = temp11
+                temp_dict['datarawmeanlessplatform'] = temp12
+
+                if self.before_event_end+5 <= len(self.mean_temp):
+                    temp13 = self.mean_temp[(self.event_start - 2) : (self.before_event_end + 6)]
+                else:
+                    temp13 = self.mean_temp[(self.event_start - 2):]
+
+                t1 = self.wim_data[(self.event_start - 3) * self.win_period, 1]
+                t2 = int(t1) + (t1 - int(t1)) * 0.6
+                event_t1 = t2
+                if (self.before_event_end + 5) * self.win_period <= len(self.wim_data[:, 1]):
+                    t1 = self.wim_data[(self.before_event_end + 5) * self.win_period, 1]
+                else:
+                    t1 = self.wim_data[-1, 1]
+                t2 = int(t1) + (t1 - int(t1)) * 0.6
+                event_t4 = t2
+                temp_dict['time'] = [event_t1, 0, 0, event_t4]
+
+                temp_dict['mean'], \
+                temp_dict['data_valid'], \
+                temp_dict['axlenum'] = event_analysis_hd(temp13, temp12, self.win_period)
+
+                EventGenerationClass.event_dict[self.k-3][self.event_number] = temp_dict
+
+                EventGenerationClass.event_dict, self.event_number, EventGenerationClass.event_abstract = \
+                    subanalysishd(self.event_number,
+                                  temp12,
+                                  EventGenerationClass.event_dict,
+                                  self.event_number,
+                                  self.k,
+                                  self.win_period,
+                                  self.win_period_third,
+                                  self.weight_coefficient,
+                                  self.mode,
+                                  EventGenerationClass.event_abstract)
+
+
+def load_npy(directory):
+    with open(directory, 'rb') as f:
+        init_data = np.load(f)
+
+    # print(init_data.shape[0])
+    fig, axs = plt.subplots(2, 1)
+    axs[0].plot(init_data[:, 3],'b',linewidth=0.5)
+    axs[1].plot(init_data[:, 4],'b',linewidth=0.5)
+    axs[0].plot(init_data[:, 5],'r',linewidth=0.5)
+    axs[1].plot(init_data[:, 6],'r',linewidth=0.5)
+    plt.show()
+
+    wim_data = init_data
+    return wim_data
+
+
+def load_txt(directory, minute):
+    col_num = 0
+    a1 = f"{directory}\\p_A1\\{minute}_Minute_RAW.txt"
+    a2 = f"{directory}\\p_A2\\{minute}_Minute_RAW.txt"
+    b1 = f"{directory}\\p_B1\\{minute}_Minute_RAW.txt"
+    b2 = f"{directory}\\p_B2\\{minute}_Minute_RAW.txt"
+
+    with open(a1) as inf:
+        reader = csv.reader(inf, delimiter=" ")
+        for i in range(5):
+            next(inf)
+        init_data = np.array(list((zip(*reader))))
+    init_data = np.transpose(init_data)
+
+    with open(a1) as inf:
+        reader = csv.reader(inf, delimiter=" ")
+        for i in range(5):
+            next(inf)
+        a1_data = np.array(list((zip(*reader))))
+    a1_data = np.transpose(a1_data)
+
+    with open(a2) as inf:
+        reader = csv.reader(inf, delimiter=" ")
+        for i in range(5):
+            next(inf)
+        a2_data = np.array(list((zip(*reader))))
+    a2_data = np.transpose(a2_data)
+
+    with open(b1) as inf:
+        reader = csv.reader(inf, delimiter=" ")
+        for i in range(5):
+            next(inf)
+        b1_data = np.array(list((zip(*reader))))
+    b1_data = np.transpose(b1_data)
+
+    with open(b2) as inf:
+        reader = csv.reader(inf, delimiter=" ")
+        for i in range(5):
+            next(inf)
+        b2_data = np.array(list((zip(*reader))))
+    b2_data = np.transpose(b2_data)
+
+    wim_data = np.zeros((init_data.shape[0], 7))
+    for i in range(len(init_data[:, 0])):
+        wim_data[i, 0] = i+1
+        wim_data[i, 1] = minute + (float(init_data[i, col_num]) - float(init_data[0, col_num])) / init_data.shape[0]
+        wim_data[i, 2] = init_data[i, col_num]
+        wim_data[i, 3] = float(a1_data[i, col_num + 1])
+        wim_data[i, 4] = float(a2_data[i, col_num + 1])
+        wim_data[i, 5] = float(b1_data[i, col_num + 1])
+        wim_data[i, 6] = float(b2_data[i, col_num + 1])
+
+    return wim_data
+
+
+def calculate_mean(data):
+    mean_less = np.zeros(np.shape(data))
+    mean_less[:,:3]=data[:,:3]
+    for i in range(3,7):
+        mean_less[:,i] = data [:,i] - np.mean(data[:,i])
+    return mean_less
+
+
+def data_analysis_hd(wim_da, win_freq, weight_co, mode):
+# try:
+#     mean_le = calculate_mean(wim_da)
+    mean_le = wim_da
+
+    pA1 = EventGenerationClass(mean_le, win_freq[0], wim_da, weight_co[0],mode,3)
+    pA2 = EventGenerationClass(mean_le, win_freq[1], wim_da, weight_co[1],mode,4)
+    pB1 = EventGenerationClass(mean_le, win_freq[2], wim_da, weight_co[2],mode,5)
+    pB2 = EventGenerationClass(mean_le, win_freq[3], wim_da, weight_co[3],mode,6)
+
+    pA1.generate_event()
+    pA2.generate_event()
+    pB1.generate_event()
+    pB2.generate_event()
+
+    event = EventGenerationClass.event_dict
+    eventabstract = EventGenerationClass.event_abstract
+
+    if len(eventabstract) > 1:
+        eventabstract = eventabstract[1:]
+        temp = np.array(eventabstract)
+        m = len(temp)
+        temp1 = np.zeros((m,2))
+        temp1[:,0]=np.sort(temp[:,4])
+        for i in range(m):
+            temp_temp1 = np.array(np.where(temp[:,4]==temp1[i,0]))
+            temp1[i,1] = temp_temp1
+
+        timemat = np.zeros((m,15))
+
+        for i in range(m):
+            event[int(temp[int(temp1[i,1]),3])][i+1]["final"] = event[int(temp[int(temp1[i,1]),3])][int(temp[int(temp1[i,1]),2])]["integrate"]
+            event[int(temp[int(temp1[i,1]),3])][int(temp[int(temp1[i,1]),2])]["integrate"] = []
+            timemat[i,int(temp[int(temp1[i,1]),3])] = temp[int(temp1[i,1]),5]
+
+        event[0][0]['integratetime'] = timemat
+        event[1][0]['integratetime'] = timemat
+        event[2][0]['integratetime'] = timemat
+        event[3][0]['integratetime'] = timemat
+
+    # scipy.io.savemat(str("new") + '.mat', mdict={'events': [temp]})
+#
+# except Exception as e:
+#     print("error:", e)
+
+    # EventGenerationClass.event_dict = [[{} for i in range(3)] for j in range(4)]
+    # EventGenerationClass.event_abstract = [[0,0,0,0,0]]
+    return event,eventabstract
+
+
+def my_main():
+    for i in range(2, 60):
+        print("minute", i)
+        in_wim_data = load_txt( r"D:\DATA 2\Kashan\20201117\15_Hour",i)
+        in_win_frequency = [40, 40, 40, 40]
+        in_weight_coefficient = [120, 120, 120, 120]
+        events = data_analysis_hd(in_wim_data, in_win_frequency, in_weight_coefficient, 'bi_platform')
+        print('>'*100)
+
+
+def my_main_npy():
+    in_wim_data = load_npy(r"D:\TEST\me\car49.npy")
+    in_win_frequency = [38, 38, 38, 38]
+    in_weight_coefficient = [122, 120, 130, 124]
+    events, eventabstract = data_analysis_hd(in_wim_data, in_win_frequency, in_weight_coefficient, 'bi_platform')
+    print('>' * 100)
+
+
+if __name__ == '__main__':
+    # my_main()
+
+    my_main_npy()
