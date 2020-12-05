@@ -1,0 +1,570 @@
+import numpy as np
+import socket
+import binascii
+import collections
+import threading
+import matplotlib.pyplot as plt
+import time
+import pika
+import datetime
+import itertools
+import sys
+# import time
+# import datetime
+# import csv
+import pickle
+
+from matplotlib.animation import FuncAnimation
+
+from functions.event_analysis import event_analysis_hd
+from functions.subanalysis import subanalysishd
+from settings import *
+
+if not sys.warnoptions:
+    import warnings
+
+    warnings.simplefilter("ignore")
+
+
+class EventGenerationClass:
+    raw_data_queue = collections.deque(maxlen=WIN_PERIOD * PERIOD_NUMBER)
+    mean_less_data_queue = collections.deque(maxlen=WIN_PERIOD * PERIOD_NUMBER)
+    event_dict = [[{} for i in range(100)] for j in range(4)]
+    event_abstract = [[0, 0, 0, 0, 0]]
+
+    def __init__(self, k):
+
+        self.mean_temp1 = collections.deque(maxlen=50)
+
+        self.mean_temp_queue = collections.deque(maxlen=PERIOD_NUMBER)
+        self.mode = MODE
+        self.k = k
+        self.weight_coefficient = WEIGHT_COEFFICIENT[k - 3]
+        self.win_period = WIN_PERIOD
+        self.win_period_half = round(self.win_period / 2)
+        self.win_period_third = round(self.win_period / 3)
+        self.win_period_quarter = round(self.win_period / 4)
+
+        self.c1 = 1
+        self.c3 = 0
+        self.event_number = 0
+        self.event_start = 0
+        self.before_event_end = 0
+        self.startbefor = 0
+        self.endbefore = 0
+        self.minimum_weight = 7000
+        self.event_between_time = 10
+        self.start_event_between_time = 10
+        self.maximum_time_between_two_event = 30
+        self.event_maximum_weight = self.minimum_weight
+        self.event_flag = 0
+        self.new_event = 0
+
+    def get_platform_name(self, platform_num):
+        if platform_num == 0:
+            return "A1"
+        elif platform_num == 1:
+            return "A2"
+        elif platform_num == 2:
+            return "B1"
+        elif platform_num == 3:
+            return "B2"
+
+    def generate_event(self, m_c):
+        temp_dict = dict()
+
+        self.c1 = self.c1 + 1
+        self.c3 = self.c3 + self.win_period
+
+        begin_index = (self.c1 - 1) * self.win_period - m_c + len(EventGenerationClass.mean_less_data_queue)
+        end_index = (self.c1) * self.win_period - m_c + len(EventGenerationClass.mean_less_data_queue)
+
+        temp = np.array(list(itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index, end_index)))[:,
+               self.k]
+        raw_temp = np.array(list(itertools.islice(EventGenerationClass.raw_data_queue, begin_index, end_index)))[:,
+                   self.k]
+
+        # print(self.k - 3, np.mean(raw_temp))
+
+        self.mean_temp_queue.append(np.mean(temp))
+        if self.mean_temp_queue[-1] > self.minimum_weight:
+            # print("mean temp > 7000")
+            if ((((self.c1 - self.before_event_end) > self.event_between_time) and (
+                    (self.c1 - self.event_start) > self.start_event_between_time))
+                    or (self.c1 < self.event_between_time and (self.c1 - self.before_event_end) > 5)):
+
+                # self.event_number = self.event_number + 1
+                self.event_number = 1
+
+                self.event_maximum_weight = self.mean_temp_queue[-1]
+                self.event_flag = 1
+                if (((self.c1 - self.before_event_end) <= self.maximum_time_between_two_event) and
+                        (self.event_number >= 2)):
+                    self.new_event = 1
+                    self.startbefor = self.event_start
+                    self.endbefore = self.before_event_end
+
+                self.event_start = self.c1
+
+            self.before_event_end = self.c1
+            temp2 = max(self.event_maximum_weight, self.mean_temp_queue[-1])
+
+            if temp2 <= 50000:
+                self.event_between_time = 8
+            elif 50000 < temp2 <= 100000:
+                self.event_between_time = 10
+            elif 100000 < temp2 <= 150000:
+                self.event_between_time = 10
+            elif 150000 < temp2 <= 200000:
+                self.event_between_time = 11
+            elif 200000 < temp2 <= 250000:
+                self.event_between_time = 12
+            elif 250000 < temp2 <= 300000:
+                self.event_between_time = 12
+            else:
+                self.event_between_time = 15
+
+            self.event_maximum_weight = temp2
+        else:
+            self.mean_temp_queue[-1] = 0
+            if m_c % 100 == 0:
+                self.mean_temp1.append(np.mean(raw_temp))
+
+        if self.new_event == 1:
+            print("previous_event")
+
+            self.new_event = 0
+            temp_dict['platformnum'] = self.event_number - 1
+
+            begin_index = (self.startbefor - 3) * self.win_period - m_c + len(EventGenerationClass.mean_less_data_queue)
+            end_index = (self.endbefore + 5) * self.win_period - m_c + len(EventGenerationClass.mean_less_data_queue)
+
+            temp_dict['dataraw'] = np.array(
+                list(itertools.islice(EventGenerationClass.raw_data_queue, begin_index, end_index)))[:,
+                                   (0, 1, 2, self.k)]
+            temp_dict['datarawmeanlessplatform'] = np.array(
+                list(itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index, end_index)))[:,
+                                                   (0, 1, 2, self.k)]
+            temp_dict['datarawmeanlessfull'] = np.array(
+                list(itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index, end_index)))
+
+            try:
+                datarawmeanlessfull_fix = np.array(list(
+                    itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index - (8 * self.win_period),
+                                     end_index)))
+                temp_dict['datarawmeanlessfull_fix'] = np.zeros((4500, 7))
+                temp_dict['datarawmeanlessfull_fix'][:np.shape(datarawmeanlessfull_fix)[0], :] = \
+                    datarawmeanlessfull_fix
+            except:
+                print("datarawmeanlessfull_fix indices exceed")
+                temp_dict['datarawmeanlessfull_fix'] = "indices exceed 4500"
+
+            temp_dict['meantemp'] = np.array(list(itertools.islice(self.mean_temp_queue,
+                                                                   (self.startbefor - 2) - (self.c1 + 1) + len(
+                                                                       self.mean_temp_queue),
+                                                                   (self.endbefore + 6) - (self.c1 + 1) + len(
+                                                                       self.mean_temp_queue))))
+
+            # region event time
+            t1 = EventGenerationClass.mean_less_data_queue[begin_index][1]
+            t2 = int(t1) + (t1 - int(t1)) * 0.6
+            event_t1 = t2
+            t1 = EventGenerationClass.mean_less_data_queue[end_index][1]
+            t2 = int(t1) + (t1 - int(t1)) * 0.6
+            event_t4 = t2
+            temp_dict['time'] = [event_t1, 0, 0, event_t4]
+            # endregion
+
+            temp_dict['mean'], \
+            temp_dict['data_valid'], \
+            temp_dict['axlenum'] = \
+                event_analysis_hd(
+                    temp_dict['meantemp'],
+                    temp_dict['datarawmeanlessplatform'],
+                    self.win_period)
+
+            EventGenerationClass.event_dict[self.k - 3][self.event_number - 1] = temp_dict
+
+            EventGenerationClass.event_dict, \
+            self.event_number, \
+            EventGenerationClass.event_abstract = \
+                subanalysishd(self.event_number,
+                              temp_dict['datarawmeanlessplatform'],
+                              EventGenerationClass.event_dict,
+                              self.event_number - 1,
+                              self.k,
+                              self.win_period,
+                              self.win_period_third,
+                              self.weight_coefficient,
+                              self.mode,
+                              EventGenerationClass.event_abstract)
+
+            p_name = self.get_platform_name(self.k - 3)
+            if p_name == "A1" or p_name == "A2":
+                plotter.new_platform_event = 1
+                plotter.custom_platform_title = f"Last Car Axle:{temp_dict['axlenum']}"
+            print("platform:", p_name)
+            print("---")
+
+        if ((((self.c1 - self.before_event_end) >= self.maximum_time_between_two_event) and (self.event_flag == 1))
+                or ((self.c3 >= m_c) and (self.event_flag == 1))):
+            # print("current_event")
+
+            self.event_flag = 0
+            temp_dict['platformnum'] = self.event_number
+
+            begin_index = (self.event_start - 3) * self.win_period - m_c + len(
+                EventGenerationClass.mean_less_data_queue)
+            end_index = (self.before_event_end + 5) * self.win_period - m_c + len(
+                EventGenerationClass.mean_less_data_queue)
+
+            temp_dict['dataraw'] = np.array(
+                list(itertools.islice(EventGenerationClass.raw_data_queue, begin_index, end_index)))[:,
+                                   (0, 1, 2, self.k)]
+            temp_dict['datarawmeanlessplatform'] = np.array(
+                list(itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index, end_index)))[:,
+                                                   (0, 1, 2, self.k)]
+            temp_dict['datarawmeanlessfull'] = np.array(
+                list(itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index, end_index)))
+
+            try:
+                datarawmeanlessfull_fix = np.array(list(
+                    itertools.islice(EventGenerationClass.mean_less_data_queue, begin_index - (8 * self.win_period),
+                                     end_index)))
+                temp_dict['datarawmeanlessfull_fix'] = np.zeros((4500, 7))
+                temp_dict['datarawmeanlessfull_fix'][:np.shape(datarawmeanlessfull_fix)[0], :] = \
+                    datarawmeanlessfull_fix
+            except:
+                print("datarawmeanlessfull_fix indices exceed")
+                temp_dict['datarawmeanlessfull_fix'] = "indices exceed 4500"
+
+            temp_dict['meantemp'] = np.array(list(itertools.islice(self.mean_temp_queue,
+                                                                   (self.event_start - 2) - (self.c1 + 1) + len(
+                                                                       self.mean_temp_queue),
+                                                                   (self.before_event_end + 6) - (self.c1 + 1) + len(
+                                                                       self.mean_temp_queue))))
+
+            # region event time
+            t1 = EventGenerationClass.mean_less_data_queue[begin_index][1]
+            t2 = int(t1) + (t1 - int(t1)) * 0.6
+            event_t1 = t2
+            t1 = EventGenerationClass.mean_less_data_queue[end_index][1]
+            t2 = int(t1) + (t1 - int(t1)) * 0.6
+            event_t4 = t2
+            temp_dict['time'] = [event_t1, 0, 0, event_t4]
+            # endregion
+
+            temp_dict['mean'], \
+            temp_dict['data_valid'], \
+            temp_dict['axlenum'] = \
+                event_analysis_hd(
+                    temp_dict['meantemp'],
+                    temp_dict['datarawmeanlessplatform'],
+                    self.win_period)
+
+            # # print(temp_dict['axlenum'])
+            # p_name = self.get_platform_name(self.k - 3)
+            # if p_name == "A1" or p_name == "A2":
+            #     plotter.new_platform_event = 1
+            #     plotter.custom_platform_title = f"Last Car Axle:{temp_dict['axlenum']}"
+            # print("platform:", p_name)
+            # print("---")
+
+            if temp_dict['axlenum']>0:
+                p_name = self.get_platform_name(self.k - 3)
+                if p_name == "A1" or p_name == "A2":
+                    plotter.new_platform_event = 1
+                    plotter.custom_platform_title = f"Last Car Axle:{temp_dict['axlenum']}"
+                print("platform:", p_name)
+                print("---")
+                with open(f'log//car_{time.time()}', 'wb') as f:
+                    np.save(f, temp_dict['datarawmeanlessfull_fix'])
+
+            #
+            # print("platform:",self.get_platform_name(self.k-3))
+            # print("---")
+            EventGenerationClass.event_dict[self.k - 3][self.event_number] = temp_dict
+
+            EventGenerationClass.event_dict, \
+            self.event_number, \
+            EventGenerationClass.event_abstract = \
+                subanalysishd(self.event_number,
+                              temp_dict['datarawmeanlessplatform'],
+                              EventGenerationClass.event_dict,
+                              self.event_number,
+                              self.k,
+                              self.win_period,
+                              self.win_period_third,
+                              self.weight_coefficient,
+                              self.mode,
+                              EventGenerationClass.event_abstract)
+
+
+class PlottingClass:
+
+    def __init__(self):
+        self.fig, self.axs = plt.subplots(3, sharex="col", gridspec_kw={'hspace': 0})
+        self.custom_platform_title = ''
+        self.custom_title = ''
+        self.new_event = 0
+        self.new_platform_event = 0
+        temp_list = ['tab:red', 'tab:green', 'tab:blue']
+        self.color_list = itertools.cycle(temp_list)
+        self.c = 'tab:blue'
+
+    def animation_function(self, i):
+        self.axs[1].cla()
+        self.axs[2].cla()
+
+        if self.new_platform_event:
+            self.new_platform_event = 0
+            self.axs[0].cla()
+            self.axs[0].text(0.5, 0.5, self.custom_platform_title, color='k', fontsize=15,
+                             bbox=dict(facecolor='white', alpha=0.5))
+
+        if self.new_event:
+            self.c = next(self.color_list)
+            self.new_event = 0
+            self.axs[0].cla()
+            self.axs[0].text(0.5, 0.5, self.custom_title, color=self.c, fontsize=15,
+                             bbox=dict(facecolor='white', alpha=0.5))
+
+        try:
+            l = np.array(list(EventGenerationClass.mean_less_data_queue))
+            a1 = l[:, 3]
+            a2 = l[:, 4]
+            b1 = l[:, 5]
+            b2 = l[:, 6]
+
+            self.axs[1].plot(a1, self.c, linewidth=1)
+            self.axs[1].set_ylabel('Platform A1', fontsize='medium')
+            self.axs[1].tick_params(labelleft=False, labelright=True)
+
+            # self.axs[0].plot(b1, 'tab:red', linewidth=1)
+
+            self.axs[2].plot(a2, self.c, linewidth=1)
+            self.axs[2].set_ylabel('Platform A2', fontsize='medium')
+            self.axs[2].tick_params(labelleft=False, labelright=True)
+
+            # self.axs[1].plot(b2, 'tab:red', linewidth=1)
+
+        except:
+            print("no data to plot")
+
+        # self.fig.suptitle(self.custom_title)
+        # self.fig.tight_layout()
+
+    def start_plotting(self):
+        plt.style.use('fivethirtyeight')
+        ani = FuncAnimation(plt.gcf(), self.animation_function, interval=500)
+        plt.show()
+
+
+def server():
+    main_counter = 1
+    live_mean = [13000000, 13000000, 13000000, 13000000]
+    temp_data = []
+    integrated = 1
+    old_counter = 0
+    datalost = 0
+    while True:
+        # Connect to WIM data provider client
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((SERVER_LISTEN_IP, SERVER_LISTEN_PORT))
+            s.listen()
+            conn, addr = s.accept()
+            with conn:
+                print('[INFO] Connected by: ', addr)
+                while True:
+                    recieved = conn.recv(4096)
+                    if not recieved:
+                        break
+
+                    # Decode received data
+                    hexlify = binascii.hexlify(recieved)
+                    start = hexlify.find(b'aaaaaaaa')
+                    data = hexlify[start:]
+
+                    length = len(data)
+                    for index in range(0, length, 88):
+                        block = data[index:index + 88]
+
+                        for ite in range(0, 88, 8):
+                            mVariable = b''
+                            mVariable += block[ite + 6:ite + 8]
+                            mVariable += block[ite + 4:ite + 6]
+                            mVariable += block[ite + 2:ite + 4]
+                            mVariable += block[ite:ite + 2]
+
+                            try:
+                                temp_data.append(int(mVariable, 16))
+                            except:
+                                pass
+
+                        try:
+                            if temp_data[1] != old_counter + 1:
+                                datalost += 1
+                                # print("data lost")
+                            old_counter = temp_data[1]
+                        except:
+                            pass
+
+                        if len(temp_data) < 11:
+                            temp_data = []
+                            continue
+
+                        # print("oc", old_counter+1)
+                        # print('c=',temp_data[1])
+                        # print('--')
+
+                        hms = float(time.strftime('%H%M%S', time.localtime(time.time())))
+                        # print(">> ", temp_data)
+                        EventGenerationClass.raw_data_queue.append([hms,
+                                                                    temp_data[1] / 100000,
+                                                                    temp_data[1],
+                                                                    temp_data[PA1_INDEX],
+                                                                    temp_data[PA2_INDEX],
+                                                                    temp_data[PB1_INDEX],
+                                                                    temp_data[PB2_INDEX]])
+                        EventGenerationClass.mean_less_data_queue.append([hms,
+                                                                          temp_data[1] / 100000,
+                                                                          temp_data[1],
+                                                                          temp_data[PA1_INDEX] - live_mean[0],
+                                                                          temp_data[PA2_INDEX] - live_mean[1],
+                                                                          temp_data[PB1_INDEX] - live_mean[2],
+                                                                          temp_data[PB2_INDEX] - live_mean[3]])
+
+                        main_counter += 1
+                        temp_data = []
+
+                        if main_counter < 2000:
+                            continue
+                        elif main_counter == 2000:
+                            l = np.array(list(EventGenerationClass.mean_less_data_queue))
+                            live_mean = [np.mean(l[:, 3]),
+                                         np.mean(l[:, 4]),
+                                         np.mean(l[:, 5]),
+                                         np.mean(l[:, 6])]
+
+                        if main_counter % WIN_PERIOD == 0:
+                            try:
+                                pA1.generate_event(main_counter)
+                                pA2.generate_event(main_counter)
+                                pB1.generate_event(main_counter)
+                                pB2.generate_event(main_counter)
+                            except Exception as e:
+                                print("event generation error", e)
+                                continue
+
+                            if len(EventGenerationClass.event_abstract) > 1:
+                                print("integrated")
+
+                                plotter.new_event = 1
+                                ab = EventGenerationClass.event_abstract[-1]
+                                # print(ab)
+                                axle_number = EventGenerationClass.event_dict[int(ab[3])][int(ab[2])]['integrate'][
+                                    'numaxle']
+                                axle_number = int(axle_number)
+
+                                weight = \
+                                    EventGenerationClass.event_dict[int(ab[3])][int(ab[2])]['integrate']['totalweight'][
+                                        4]
+                                weight = int(weight)
+
+                                velocity = \
+                                    EventGenerationClass.event_dict[int(ab[3])][int(ab[2])]['integrate']['velocity'][4]
+                                velocity = int(velocity)
+
+                                car_class = EventGenerationClass.event_dict[int(ab[3])][int(ab[2])]['integrate'][
+                                    'class']
+
+                                label = f"Axle:{axle_number} Weight:{weight} Velocity:{velocity} Class:{car_class}"
+                                plotter.custom_title = label
+                                print(label)
+                                print("-" * 20)
+
+                                EventGenerationClass.event_abstract = [[0, 0, 0, 0, 0]]
+                                EventGenerationClass.event_dict = [[{} for i in range(25)] for j in range(4)]
+
+                            # if len(EventGenerationClass.event_abstract) > integrated:
+                            #
+                            #     integrated = len(EventGenerationClass.event_abstract)
+                            #     print("integrated")
+
+                        if main_counter % (2000 * 1) == 0:
+                            live_mean = [np.mean(pA1.mean_temp1),
+                                         np.mean(pA2.mean_temp1),
+                                         np.mean(pB1.mean_temp1),
+                                         np.mean(pB2.mean_temp1)]
+
+                            # print(live_mean)
+                        if main_counter % (2000 * 30) == 0:
+                            print("lost", datalost, "data sample")
+
+
+def on_message_received(msg):
+    decoded_message = msg.decode('utf-8').split("|")
+    if decoded_message[1] != 'L5':
+        print("[ANPR] Received message: Time: {}, Line: {}, Counter: {}".format(
+            datetime.datetime.fromtimestamp(np.float(decoded_message[0])), decoded_message[1], decoded_message[2]))
+
+
+if __name__ == '__main__':
+    try:
+        pA1 = EventGenerationClass(3)
+        pA2 = EventGenerationClass(4)
+        pB1 = EventGenerationClass(5)
+        pB2 = EventGenerationClass(6)
+
+        server_thread = threading.Thread(target=server)
+        server_thread.start()
+
+        # event_processor = EventProcessingClass()
+        # event_queue_thread = threading.Thread(target=event_processor.event_queue_read)
+        # event_queue_thread.start()
+
+        plotter = PlottingClass()
+        plotter.start_plotting()
+
+        # RabbitMQ configurations
+        print("[INFO] Broker Configuration")
+        credentials = pika.PlainCredentials(RABBIT_USER, RABBIT_PASSWORD)
+        parameters = pika.ConnectionParameters(RABBIT_ADDRESS, credentials=credentials,
+                                               heartbeat=RABBIT_HEARTBEAT)
+        connection = pika.BlockingConnection(parameters)
+
+        # Setup the channel
+        print("[INFO] Setting up channel")
+        channel = connection.channel()
+
+        # Declare the queue
+        print("[INFO] Declaring queue")
+        channel.queue_declare(queue=RABBIT_CHANNEL)
+
+
+        # Callback function
+        def callback(ch, method, properties, body):
+            on_message_received(body)
+
+
+        # Subscribe to the queue
+        channel.basic_consume(RABBIT_CHANNEL,
+                              callback,
+                              auto_ack=True)
+
+        print("[INFO] Start consuming")
+        channel.start_consuming()
+
+        print("[INFO] Closing connection")
+        connection.close()
+
+    except pika.exceptions.ConnectionClosed:
+        print("[INFO] Connection closed")
+
+        time.sleep(10)
+
+    except pika.exceptions.AMQPConnectionError:
+        print("[INFO] Error in connection")
+        time.sleep(10)
+
+
